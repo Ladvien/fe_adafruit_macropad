@@ -7,6 +7,7 @@
 use bsp::entry;
 use defmt::*;
 use defmt_rtt as _;
+use embedded_hal::digital::v2::InputPin;
 use embedded_hal::digital::v2::OutputPin;
 use panic_probe as _;
 
@@ -14,6 +15,18 @@ use panic_probe as _;
 // Uncomment the BSP you included in Cargo.toml, the rest of the code does not need to change.
 use rp_pico as bsp;
 // use sparkfun_pro_micro_rp2040 as bsp;
+
+// USB Device support
+use usb_device::{class_prelude::*, prelude::*};
+
+// USB Human Interface Device (HID) Class support
+use usbd_hid::descriptor::generator_prelude::*;
+use usbd_hid::descriptor::KeyboardReport;
+use usbd_hid::hid_class::HIDClass;
+
+const USB_HOST_POLL_MS: u8 = 10;
+const KEY_I: u8 = 0x0c;
+const KEY_ESC: u8 = 0x29;
 
 use bsp::hal::{
     clocks::{init_clocks_and_plls, Clock},
@@ -44,6 +57,26 @@ fn main() -> ! {
     .ok()
     .unwrap();
 
+    // Set up the USB driver
+    let usb_bus = UsbBusAllocator::new(bsp::hal::usb::UsbBus::new(
+        pac.USBCTRL_REGS,
+        pac.USBCTRL_DPRAM,
+        clocks.usb_clock,
+        true,
+        &mut pac.RESETS,
+    ));
+
+    // Set up the USB HID Class Device driver, providing Keyboard Reports
+    let mut usb_hid = HIDClass::new(&usb_bus, KeyboardReport::desc(), USB_HOST_POLL_MS);
+
+    // Create a USB device with a fake VID and PID
+    let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x27da))
+        .manufacturer("Thomas Brittain")
+        .product("Adafruit Macropad")
+        .serial_number("0")
+        .device_class(0)
+        .build();
+
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
 
     let pins = bsp::Pins::new(
@@ -53,21 +86,51 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
-    // This is the correct pin on the Raspberry Pico board. On other boards, even if they have an
-    // on-board LED, it might need to be changed.
-    // Notably, on the Pico W, the LED is not connected to any of the RP2040 GPIOs but to the cyw43 module instead. If you have
-    // a Pico W and want to toggle a LED with a simple GPIO output pin, you can connect an external
-    // LED to one of the GPIO pins, and reference that pin here.
-    let mut led_pin = pins.led.into_push_pull_output();
+    let mut led_pin = pins.gpio13.into_push_pull_output();
+
+    let mut switch_pin = pins.gpio0.into_pull_up_input();
+    let mut switch_state = switch_pin.is_low();
 
     loop {
-        info!("on!");
-        led_pin.set_high().unwrap();
-        delay.delay_ms(500);
-        info!("off!");
-        led_pin.set_low().unwrap();
-        delay.delay_ms(500);
+        usb_dev.poll(&mut [&mut usb_hid]);
+
+        let previous_switch_state = switch_state;
+        switch_state = switch_pin.is_low();
+
+        match (previous_switch_state, switch_state) {
+            (Ok(true), Ok(false)) => {
+                info!("normal mode!");
+                led_pin.set_low().unwrap();
+                send_key_press(&usb_hid, &mut delay, KEY_ESC);
+            }
+            (Ok(false), Ok(true)) => {
+                info!("insert mode!");
+                led_pin.set_high().unwrap();
+                send_key_press(&usb_hid, &mut delay, KEY_I);
+            }
+            _ => {}
+        }
     }
+}
+
+fn send_key_press(
+    usb_hid: &HIDClass<bsp::hal::usb::UsbBus>,
+    delay: &mut cortex_m::delay::Delay,
+    key_code: u8,
+) {
+    let mut keyboard_report = KeyboardReport {
+        modifier: 0,
+        reserved: 0,
+        leds: 0,
+        keycodes: [0; 6],
+    };
+    keyboard_report.keycodes[0] = key_code;
+    usb_hid.push_input(&keyboard_report).unwrap();
+    delay.delay_ms(USB_HOST_POLL_MS.into());
+
+    keyboard_report.keycodes[0] = 0;
+    usb_hid.push_input(&keyboard_report).unwrap();
+    delay.delay_ms(USB_HOST_POLL_MS.into());
 }
 
 // End of file
