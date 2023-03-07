@@ -15,6 +15,9 @@ panic-probe = {version = "0.3", features = ["print-defmt"]}
 # We're using a Pico by default on this template
 rp-pico = "0.7"
 
+fugit = "0.3.6"
+rp2040-hal = "0.8.0"
+sh1106 = "0.4.0"
 usb-device = "0.2.9"
 usbd-hid = "0.5.1"
 

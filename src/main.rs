@@ -1,6 +1,3 @@
-//! Blinks the LED on a Pico board
-//!
-//! This will blink an LED attached to GP25, which is the pin the Pico uses for the on-board LED.
 #![no_std]
 #![no_main]
 
@@ -12,7 +9,8 @@ use embedded_hal::digital::v2::OutputPin;
 use panic_probe as _;
 
 // Provide an alias for our BSP so we can switch targets quickly.
-// Uncomment the BSP you included in Cargo.toml, the rest of the code does not need to change.
+// Uncomment the BSP you included in Cargo.toml, the rest of the code
+// does not need to change.
 use rp_pico as bsp;
 // use sparkfun_pro_micro_rp2040 as bsp;
 
@@ -30,10 +28,19 @@ const KEY_ESC: u8 = 0x29;
 
 use bsp::hal::{
     clocks::{init_clocks_and_plls, Clock},
-    pac,
+    // pac,
     sio::Sio,
     watchdog::Watchdog,
 };
+
+// Some traits we need
+use embedded_hal::blocking::i2c::Write;
+use fugit::RateExtU32;
+
+// // Alias for our HAL crate
+use rp2040_hal as hal;
+
+use hal::pac;
 
 #[entry]
 fn main() -> ! {
@@ -79,6 +86,7 @@ fn main() -> ! {
 
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
 
+    // Set the pins to their default state
     let pins = bsp::Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
@@ -90,6 +98,25 @@ fn main() -> ! {
 
     let mut switch_pin = pins.gpio0.into_pull_up_input();
     let mut switch_state = switch_pin.is_low();
+
+    // Configure two pins as being I²C, not GPIO
+    let sda_pin = pins.gpio20.into_mode::<hal::gpio::FunctionI2C>();
+    let scl_pin = pins.gpio21.into_mode::<hal::gpio::FunctionI2C>();
+
+    // Create the I²C drive, using the two pre-configured pins. This will fail
+    // at compile time if the pins are in the wrong mode, or if this I²C
+    // peripheral isn't available on these pins!
+    let mut i2c = hal::I2C::i2c0(
+        pac.I2C0,
+        sda_pin,
+        scl_pin, // Try `not_an_scl_pin` here
+        400.kHz(),
+        &mut pac.RESETS,
+        &clocks.system_clock,
+    );
+
+    // Write three bytes to the I²C device with 7-bit address 0x2C
+    i2c.write(0x2c, &[1, 2, 3]).unwrap();
 
     loop {
         usb_dev.poll(&mut [&mut usb_hid]);
