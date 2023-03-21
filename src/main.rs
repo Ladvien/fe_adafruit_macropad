@@ -1,22 +1,30 @@
 #![no_std]
 #![no_main]
 
-use bsp::entry;
-use bsp::pac::Peripherals;
-use cortex_m::prelude::*;
-use defmt::*;
-use defmt_rtt as _;
-use embedded_hal::digital::v2::InputPin;
-use embedded_hal::digital::v2::OutputPin;
-use hal::clocks::ClocksManager;
-use hal::clocks::UsbClock;
+// use core::default;
+
+use hal::clocks::{ClockSource, ClocksManager, UsbClock};
 use panic_probe as _;
 
-// Provide an alias for our BSP so we can switch targets quickly.
-// Uncomment the BSP you included in Cargo.toml, the rest of the code
-// does not need to change.
-use rp_pico as bsp;
-// use sparkfun_pro_micro_rp2040 as bsp;
+// Provide an alias for our rp_pico so we can switch targets quickly.
+use rp_pico;
+use rp_pico::entry;
+use rp_pico::hal::{
+    clocks::init_clocks_and_plls,
+    // pac,
+    sio::Sio,
+    watchdog::Watchdog,
+};
+
+use embedded_hal::digital::v2::InputPin;
+use embedded_hal::digital::v2::OutputPin;
+
+// use cortex_m::prelude::*;
+
+use defmt::*;
+use defmt_rtt as _;
+
+// use hal::clocks::ClocksManager;
 
 // USB Device support
 use usb_device::{class_prelude::*, prelude::*};
@@ -30,16 +38,9 @@ const USB_HOST_POLL_MS: u8 = 10;
 const KEY_I: u8 = 0x0c;
 const KEY_ESC: u8 = 0x29;
 
-use bsp::hal::{
-    clocks::{init_clocks_and_plls, Clock},
-    // pac,
-    sio::Sio,
-    watchdog::Watchdog,
-};
-
 // Some traits we need
-use embedded_hal::blocking::i2c::Write;
-use fugit::RateExtU32;
+// use embedded_hal::blocking::i2c::Write;
+// use fugit::RateExtU32;
 
 // // Alias for our HAL crate
 use rp2040_hal as hal;
@@ -56,10 +57,10 @@ fn main() -> ! {
     // External high-speed crystal on the pico board is 12Mhz
     let external_xtal_freq_hz = 12_000_000u32;
     let clocks = setup_clock(external_xtal_freq_hz);
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
+    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.get_freq().to_Hz());
 
     // Set the pins to their default state
-    let pins = bsp::Pins::new(
+    let pins = rp_pico::Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
         sio.gpio_bank0,
@@ -71,88 +72,97 @@ fn main() -> ! {
     let mut switch_pin = pins.gpio0.into_pull_up_input();
     let mut switch_state = switch_pin.is_low();
 
-    let usb_bus = UsbBusAllocator::new(bsp::hal::usb::UsbBus::new(
+    /* ################################ USB ##################################### */
+
+    // Set up the USB HID Class Device driver, providing Keyboard Reports
+    let mut pac = pac::Peripherals::take().unwrap();
+    let usb_bus = rp_pico::hal::usb::UsbBus::new(
         pac.USBCTRL_REGS,
         pac.USBCTRL_DPRAM,
         clocks.usb_clock,
         true,
         &mut pac.RESETS,
-    ));
+    );
+    let usb_bus_alloc = UsbBusAllocator::new(usb_bus);
+    let mut usb_hid = HIDClass::new(&usb_bus_alloc, KeyboardReport::desc(), USB_HOST_POLL_MS);
 
-    let mut pac = pac::Peripherals::take().unwrap();
-    // Set up the USB HID Class Device driver, providing Keyboard Reports
-
-    let mut usb_hid = HIDClass::new(&usb_bus, KeyboardReport::desc(), USB_HOST_POLL_MS);
     // Create a USB device with a fake VID and PID
-    let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x27da))
+    let mut usb_dev = UsbDeviceBuilder::new(&usb_bus_alloc, UsbVidPid(0x16c0, 0x27da))
         .manufacturer("Thomas Brittain")
         .product("Adafruit Macropad")
         .serial_number("0")
         .device_class(0)
         .build();
 
+    /* ############################ END USB ######################################### */
+    // let (usb_dev, usb_hid) = setup_usb_hid(clocks.usb_clock);
+
+    let mut pac = pac::Peripherals::take().unwrap();
+
     // Configure two pins as being I²C, not GPIO
-    let sda_pin = pins.gpio20.into_mode::<hal::gpio::FunctionI2C>();
-    let scl_pin = pins.gpio21.into_mode::<hal::gpio::FunctionI2C>();
+    // let sda_pin = pins.gpio20.into_mode::<hal::gpio::FunctionI2C>();
+    // let scl_pin = pins.gpio21.into_mode::<hal::gpio::FunctionI2C>();
 
-    // Create the I²C drive, using the two pre-configured pins. This will fail
-    // at compile time if the pins are in the wrong mode, or if this I²C
-    // peripheral isn't available on these pins!
-    let mut i2c = hal::I2C::i2c0(
-        pac.I2C0,
-        sda_pin,
-        scl_pin, // Try `not_an_scl_pin` here
-        400.kHz(),
-        &mut pac.RESETS,
-        &clocks.system_clock,
-    );
+    // // Create the I²C drive, using the two pre-configured pins. This will fail
+    // // at compile time if the pins are in the wrong mode, or if this I²C
+    // // peripheral isn't available on these pins!
+    // let mut i2c = hal::I2C::i2c0(
+    //     pac.I2C0,
+    //     sda_pin,
+    //     scl_pin, // Try `not_an_scl_pin` here
+    //     400.kHz(),
+    //     &mut pac.RESETS,
+    //     &clocks.system_clock,
+    // );
 
-    // Write three bytes to the I²C device with 7-bit address 0x2C
-    i2c.write(0x2c, &[1, 2, 3]).unwrap();
+    // // Write three bytes to the I²C device with 7-bit address 0x2C
+    // i2c.write(0x2c, &[1, 2, 3]).unwrap();
 
     /* ################## BEGIN SPI ################################ */
     // These are implicitly used by the spi driver if they are in the correct mode
-    let _spi_sclk = pins.gpio26.into_mode::<hal::gpio::FunctionSpi>();
-    let _spi_mosi = pins.gpio27.into_mode::<hal::gpio::FunctionSpi>();
-    let _spi_miso = pins.gpio28.into_mode::<hal::gpio::FunctionSpi>();
-    let spi = hal::Spi::<_, _, 8>::new(pac.SPI0);
+    // let _spi_sclk = pins.gpio26.into_mode::<hal::gpio::FunctionSpi>();
+    // let _spi_mosi = pins.gpio27.into_mode::<hal::gpio::FunctionSpi>();
+    // let _spi_miso = pins.gpio28.into_mode::<hal::gpio::FunctionSpi>();
+    // let spi = hal::Spi::<_, _, 8>::new(pac.SPI0);
 
-    // Exchange the uninitialised SPI driver for an initialised one
-    let mut spi = spi.init(
-        &mut pac.RESETS,
-        clocks.peripheral_clock.freq(),
-        400.kHz(),
-        &embedded_hal::spi::MODE_0,
-    );
+    // // Exchange the uninitialised SPI driver for an initialised one
+    // let mut spi = spi.init(
+    //     &mut pac.RESETS,
+    //     &clocks.peripheral_clock,
+    //     400.kHz(),
+    //     &embedded_hal::spi::MODE_0,
+    // );
 
-    // Write out 0, ignore return value
-    if spi.write(&[0]).is_ok() {
-        // SPI write was succesful
-    };
+    // // Write out 0, ignore return value
+    // if spi.write(&[0]).is_ok() {
+    //     // SPI write was succesful
+    // };
 
-    // write 50, then check the return
-    let send_success = spi.send(50);
-    match send_success {
-        Ok(_) => {
-            // We succeeded, check the read value
-            if let Ok(_x) = spi.read() {
-                // We got back `x` in exchange for the 0x50 we sent.
-            };
-        }
-        Err(_) => (),
-    }
+    // // write 50, then check the return
+    // let send_success = spi.send(50);
+    // match send_success {
+    //     Ok(_) => {
+    //         // We succeeded, check the read value
+    //         if let Ok(_x) = spi.read() {
+    //             // We got back `x` in exchange for the 0x50 we sent.
+    //         };
+    //     }
+    //     Err(_) => (),
+    // }
 
-    // Do a read+write at the same time. Data in `buffer` will be replaced with
-    // the data read from the SPI device.
-    let mut buffer: [u8; 4] = [1, 2, 3, 4];
-    let transfer_success = spi.transfer(&mut buffer);
-    #[allow(clippy::single_match)]
-    match transfer_success {
-        Ok(_) => {} // Handle success
-        Err(_) => {}
-    };
+    // // Do a read+write at the same time. Data in `buffer` will be replaced with
+    // // the data read from the SPI device.
+    // let mut buffer: [u8; 4] = [1, 2, 3, 4];
+    // let transfer_success = spi.transfer(&mut buffer);
+    // #[allow(clippy::single_match)]
+    // match transfer_success {
+    //     Ok(_) => {} // Handle success
+    //     Err(_) => {}
+    // };
 
     /* ################### END SPI ############################### */
+    led_pin.set_high();
+    delay.delay_ms(5000);
 
     loop {
         usb_dev.poll(&mut [&mut usb_hid]);
@@ -173,11 +183,12 @@ fn main() -> ! {
             }
             _ => {}
         }
+        // delay.delay_ms(1000);
     }
 }
 
 fn send_key_press(
-    usb_hid: &HIDClass<bsp::hal::usb::UsbBus>,
+    usb_hid: &HIDClass<rp_pico::hal::usb::UsbBus>,
     delay: &mut cortex_m::delay::Delay,
     key_code: u8,
 ) {
@@ -214,13 +225,31 @@ fn setup_clock(external_xtal_freq_hz: u32) -> ClocksManager {
     clocks
 }
 
-// fn setup_usb_hid(
-//     // usb_clock: UsbClock,
-//     usb_bus: usb_device::bus::UsbBusAllocator<rp2040_hal::usb::UsbBus>,
+// fn setup_usb_hid<'a>(
+//     usb_clock: UsbClock,
+//     // clocks: &'a ClocksManager,
 // ) -> (
 //     UsbDevice<'static, hal::usb::UsbBus>,
 //     HIDClass<'static, hal::usb::UsbBus>,
 // ) {
+//     let mut pac = pac::Peripherals::take().unwrap();
+//     let usb_bus = rp_pico::hal::usb::UsbBus::new(
+//         pac.USBCTRL_REGS,
+//         pac.USBCTRL_DPRAM,
+//         usb_clock,
+//         true,
+//         &mut pac.RESETS,
+//     );
+//     let usb_bus_alloc = UsbBusAllocator::new(usb_bus);
+//     let mut usb_hid = HIDClass::new(&usb_bus_alloc, KeyboardReport::desc(), USB_HOST_POLL_MS);
+//     // Create a USB device with a fake VID and PID
+//     let mut usb_dev = UsbDeviceBuilder::new(&usb_bus_alloc, UsbVidPid(0x16c0, 0x27da))
+//         .manufacturer("Thomas Brittain")
+//         .product("Adafruit Macropad")
+//         .serial_number("0")
+//         .device_class(0)
+//         .build();
 
+//     (usb_dev, usb_hid)
 // }
 // End of file
